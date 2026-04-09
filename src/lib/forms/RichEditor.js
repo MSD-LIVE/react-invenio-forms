@@ -20,6 +20,17 @@ import "tinymce/plugins/link";
 import "tinymce/plugins/lists";
 import "tinymce/plugins/wordcount";
 import "tinymce/plugins/preview";
+import "tinymce/plugins/advlist";
+import "tinymce/plugins/autolink";
+import "tinymce/plugins/charmap";
+import "tinymce/plugins/searchreplace";
+import "tinymce/plugins/visualblocks";
+import "tinymce/plugins/fullscreen";
+import "tinymce/plugins/insertdatetime";
+import "tinymce/plugins/media";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+import imageCompression from "browser-image-compression";
 import PropTypes from "prop-types";
 import { Button, Message } from "semantic-ui-react";
 import { FilesList } from "./FilesList";
@@ -116,6 +127,7 @@ export class RichEditor extends Component {
 
   /**
    * This function is called when a user drag-n-drops an image onto the editor text area.
+   * Used only when files are enabled (record with file upload backend).
    */
   imagesUploadHandler = async (blobInfo, progress) => {
     const filename = blobInfo.filename();
@@ -132,6 +144,39 @@ export class RichEditor extends Component {
       this.addToFileErrors(filename, error);
       throw error;
     }
+  };
+
+  /**
+   * Used when no file upload backend is available (e.g. the description field).
+   * Compresses the image to a target of 200KB and returns a base64 data URL
+   * which gets embedded directly in the HTML content.
+   */
+  imagesBase64UploadHandler = async (blobInfo, progress) => {
+    const imageFile = blobInfo.blob();
+    const targetSizeBytes = 200 * 1024;
+    let finalImage = imageFile;
+
+    if (imageFile.size > targetSizeBytes) {
+      try {
+        finalImage = await imageCompression(imageFile, {
+          maxSizeMB: 0.2,
+          useWebWorker: true,
+          fileType: imageFile.type,
+        });
+      } catch (compressionError) {
+        console.warn("Image compression failed, using original:", compressionError);
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(finalImage);
+      reader.onloadend = () => {
+        progress(100);
+        resolve(reader.result);
+      };
+      reader.onerror = () => reject(new Error("Failed to encode image as base64"));
+    });
   };
 
   /**
@@ -219,7 +264,7 @@ export class RichEditor extends Component {
    * or on the attach files button next to the files list.
    */
   onAttachFiles = () => {
-    this.filePickerCallback(() => {}, "", "file");
+    this.filePickerCallback(() => { }, "", "file");
   };
 
   mapToEditorLinkList = (files) => {
@@ -288,6 +333,114 @@ export class RichEditor extends Component {
     });
   };
 
+  registerMarkdownButton = (editor) => {
+    editor.ui.registry.addButton("markdownimport", {
+      text: "MD",
+      tooltip: "Import Markdown",
+      onAction: () => this.openMarkdownDialog(editor),
+    });
+  };
+
+  convertMarkdownToHTML = (markdown) => {
+    marked.setOptions({ breaks: true, gfm: true });
+    const rawHtml = marked.parse(markdown);
+    return DOMPurify.sanitize(rawHtml, {
+      ALLOWED_TAGS: [
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "p", "br", "strong", "em", "u", "strike",
+        "ul", "ol", "li",
+        "a", "code", "pre", "blockquote",
+        "table", "thead", "tbody", "tr", "th", "td",
+        "hr", "img", "div", "span",
+      ],
+      ALLOWED_ATTR: ["href", "src", "alt", "title", "class", "id"],
+    });
+  };
+
+  openMarkdownDialog = (editor) => {
+    editor.windowManager.open({
+      title: "Import Markdown",
+      body: {
+        type: "panel",
+        items: [{ type: "htmlpanel", html: "<p>Choose how to import:</p>" }],
+      },
+      buttons: [
+        { type: "custom", name: "uploadfile", text: "Upload .md File" },
+        { type: "custom", name: "pastetext", text: "Paste Markdown", primary: true },
+        { type: "cancel", text: "Cancel" },
+      ],
+      onAction: (dialogApi, details) => {
+        if (details.name === "uploadfile") {
+          dialogApi.close();
+          this.uploadMarkdownFile(editor);
+        } else if (details.name === "pastetext") {
+          dialogApi.close();
+          this.pasteMarkdownText(editor);
+        }
+      },
+    });
+  };
+
+  uploadMarkdownFile = (editor) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".md,.markdown,text/markdown,text/plain";
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        editor.insertContent(this.convertMarkdownToHTML(text));
+        editor.notificationManager.open({
+          text: `Markdown imported: ${file.name}`,
+          type: "success",
+          timeout: 3000,
+        });
+      } catch (error) {
+        editor.notificationManager.open({
+          text: `Failed: ${error.message}`,
+          type: "error",
+          timeout: 5000,
+        });
+      }
+    };
+    input.click();
+  };
+
+  pasteMarkdownText = (editor) => {
+    editor.windowManager.open({
+      title: "Paste Markdown",
+      size: "large",
+      body: {
+        type: "panel",
+        items: [
+          {
+            type: "textarea",
+            name: "markdown",
+            label: "Markdown Content",
+            placeholder: "# Heading\n\n**Bold text**\n\n- List item",
+          },
+        ],
+      },
+      buttons: [
+        { type: "cancel", text: "Cancel" },
+        { type: "submit", text: "Import", primary: true },
+      ],
+      onSubmit: (dialogApi) => {
+        const data = dialogApi.getData();
+        if (data.markdown && data.markdown.trim()) {
+          editor.insertContent(this.convertMarkdownToHTML(data.markdown));
+          dialogApi.close();
+          editor.notificationManager.open({
+            text: "Markdown imported!",
+            type: "success",
+            timeout: 3000,
+          });
+        }
+      },
+    });
+  };
+
   render() {
     const localRefEditorDialogRef = this.editorDialogRef;
 
@@ -311,34 +464,100 @@ export class RichEditor extends Component {
       branding: false,
       menubar: false,
       statusbar: false,
+      license_key: "gpl",
+      promotion: false,
       min_height: minHeight,
+      toolbar_mode: "wrap",
       content_style: editorContentStyle(disabled),
       plugins: [
+        "advlist",
+        "autolink",
         "autoresize",
+        "charmap",
         "code",
         "codesample",
+        "fullscreen",
         "image",
+        "insertdatetime",
         "link",
         "lists",
-        "table",
-        "wordcount",
+        "media",
         "preview",
+        "searchreplace",
+        "table",
+        "visualblocks",
+        "wordcount",
       ],
       contextmenu: false,
-      toolbar: `blocks | bold italic codesample blockquote table | bullist numlist | outdent indent | link image ${
-        attachFilesEnabled ? "attach " : " "
-      }| wordcount | undo redo | code | custom_preview`,
+      toolbar: `blocks | bold italic underline strikethrough | bullist numlist | outdent indent | link image ${attachFilesEnabled ? "attach " : " "
+        }| codesample blockquote table | markdownimport | wordcount | undo redo | code | custom_preview`,
       autoresize_bottom_margin: 20,
       block_formats: "Paragraph=p; Header 1=h1; Header 2=h2; Header 3=h3",
       table_advtab: false,
+      image_advtab: true,
       convert_urls: false,
+      paste_data_images: true,
+      // When no file backend is available (e.g. description field), images are
+      // compressed and embedded as base64 data URLs directly in the content.
+      images_upload_handler: this.imagesBase64UploadHandler,
       setup: (editor) => {
         this.registerCustomPreviewButton(editor);
+        this.registerMarkdownButton(editor);
+        editor.on("OpenWindow", function (eventDetails) {
+          if (attachFilesEnabled) {
+            localRefEditorDialogRef.current = eventDetails.dialog;
+          }
+          requestAnimationFrame(() => {
+            const dialog = document.querySelector(".tox-dialog");
+            if (!dialog) return;
+            const title = dialog.querySelector(".tox-dialog__title");
+            if (title && title.textContent.trim() === "Insert/Edit Image") {
+              // Make Source field readonly
+              dialog.querySelectorAll(".tox-form__group").forEach((group) => {
+                const label = group.querySelector("label");
+                if (label && label.textContent.trim() === "Source") {
+                  const input = group.querySelector("input");
+                  if (input) {
+                    input.setAttribute("readonly", "readonly");
+                    input.style.backgroundColor = "#f0f0f0";
+                    input.style.cursor = "not-allowed";
+                  }
+                }
+              });
+
+              // Move Upload tab to first position and activate it by default
+              const navBar = dialog.querySelector(".tox-dialog__body-nav");
+              if (navBar) {
+                const navItems = Array.from(navBar.querySelectorAll(".tox-dialog__body-nav-item"));
+                const uploadTab = navItems.find((item) => item.textContent.trim() === "Upload");
+                if (uploadTab) {
+                  // Click to activate the tab (fires TinyMCE's internal tab-switch handler)
+                  uploadTab.click();
+                  // Then move it to first position visually
+                  navBar.insertBefore(uploadTab, navBar.firstChild);
+                }
+              }
+
+              // Enter key anywhere in the dialog clicks Save
+              if (!dialog._enterHooked) {
+                dialog._enterHooked = true;
+                dialog.addEventListener("keydown", (e) => {
+                  if (e.key === "Enter") {
+                    // Don't intercept Enter inside a textarea
+                    if (e.target.tagName === "TEXTAREA") return;
+                    e.preventDefault();
+                    const saveBtn = Array.from(
+                      dialog.querySelectorAll(".tox-dialog__footer .tox-button")
+                    ).find((btn) => btn.textContent.trim() === "Save");
+                    if (saveBtn) saveBtn.click();
+                  }
+                });
+              }
+            }
+          });
+        });
         if (attachFilesEnabled) {
           this.registerAttachButton(editor);
-          editor.on("OpenWindow", function (eventDetails) {
-            localRefEditorDialogRef.current = eventDetails.dialog;
-          });
         }
       },
       ...editorConfig,
@@ -349,7 +568,7 @@ export class RichEditor extends Component {
         ...config,
         // No need for TinyMCE to generate unique filenames since we delegate this responsibility to the backend.
         images_reuse_filename: true,
-        // This function is called when a user drag-n-drops an image onto the editor text area.
+        // Override the base64 handler with the full server-upload handler (with compression).
         images_upload_handler: this.imagesUploadHandler,
         // We do not implement the file picker type `media` since we do not enable the Media plugin/button.
         file_picker_types: "file image",
@@ -373,15 +592,31 @@ export class RichEditor extends Component {
     return (
       <>
         <Editor
+          licenseKey="gpl"
           initialValue={initialValue}
-          value={inputValue}
+          value={typeof inputValue === "string" ? inputValue : undefined}
           init={config}
           id={id}
           disabled={disabled}
-          onBlur={onBlur}
+          onBlur={async (event, editor) => {
+            // Wait for any pending image uploads (e.g. base64 conversion) to
+            // complete before notifying parent. Without this, getContent() in
+            // the onBlur handler (RichInputField) would still contain blob: URLs
+            // which are lost after page reload.
+            await editor.uploadImages();
+            onBlur && onBlur(event, editor);
+          }}
           onFocus={onFocus}
           onChange={onChange}
-          onEditorChange={onEditorChange}
+          onEditorChange={(content, editor) => {
+            // Skip updating parent state while images are still being processed
+            // (blob: URLs are temporary and will be replaced by the upload handler).
+            // Forwarding blob: URLs to Redux would cause them to be pushed back as
+            // `value`, overwriting the final base64/server URL with the stale blob.
+            if (onEditorChange && !content.includes("blob:")) {
+              onEditorChange(content, editor);
+            }
+          }}
           onInit={(event, editor) => {
             this.editorRef.current = editor;
             onInit && onInit(event, editor);
