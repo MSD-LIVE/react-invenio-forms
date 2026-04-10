@@ -512,18 +512,18 @@ export class RichEditor extends Component {
             if (!dialog) return;
             const title = dialog.querySelector(".tox-dialog__title");
             if (title && title.textContent.trim() === "Insert/Edit Image") {
-              // Make Source field readonly
-              dialog.querySelectorAll(".tox-form__group").forEach((group) => {
-                const label = group.querySelector("label");
-                if (label && label.textContent.trim() === "Source") {
-                  const input = group.querySelector("input");
-                  if (input) {
-                    input.setAttribute("readonly", "readonly");
-                    input.style.backgroundColor = "#f0f0f0";
-                    input.style.cursor = "not-allowed";
+
+              const hideSourceField = () => {
+                dialog.querySelectorAll(".tox-form__group").forEach((group) => {
+                  const label = group.querySelector("label");
+                  if (label && label.textContent.trim() === "Source") {
+                    group.style.display = "none";
                   }
-                }
-              });
+                });
+              };
+
+              // Hide on initial open
+              hideSourceField();
 
               // Move Upload tab to first position and activate it by default
               const navBar = dialog.querySelector(".tox-dialog__body-nav");
@@ -531,11 +531,20 @@ export class RichEditor extends Component {
                 const navItems = Array.from(navBar.querySelectorAll(".tox-dialog__body-nav-item"));
                 const uploadTab = navItems.find((item) => item.textContent.trim() === "Upload");
                 if (uploadTab) {
-                  // Click to activate the tab (fires TinyMCE's internal tab-switch handler)
                   uploadTab.click();
-                  // Then move it to first position visually
                   navBar.insertBefore(uploadTab, navBar.firstChild);
                 }
+              }
+
+              // MutationObserver: re-hide Source whenever TinyMCE re-renders dialog content
+              // (tab switches, post-upload auto-switch to General tab, etc.)
+              const dialogBody = dialog.querySelector(".tox-dialog__body-content");
+              if (dialogBody && !dialogBody._sourceObserver) {
+                const observer = new MutationObserver(() => hideSourceField());
+                observer.observe(dialogBody, { childList: true, subtree: true });
+                dialogBody._sourceObserver = observer;
+                // Clean up when dialog closes
+                dialog.addEventListener("remove", () => observer.disconnect(), { once: true });
               }
 
               // Enter key anywhere in the dialog clicks Save
@@ -543,7 +552,6 @@ export class RichEditor extends Component {
                 dialog._enterHooked = true;
                 dialog.addEventListener("keydown", (e) => {
                   if (e.key === "Enter") {
-                    // Don't intercept Enter inside a textarea
                     if (e.target.tagName === "TEXTAREA") return;
                     e.preventDefault();
                     const saveBtn = Array.from(
